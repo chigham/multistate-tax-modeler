@@ -107,6 +107,9 @@ const elements = {
   geographyChoiceLabel: $("#geography-choice-label"),
   geographyChoiceSelect: $("#geography-choice-select"),
   underutilizedControl: $("#underutilized-control"),
+  parcelDensityToggle: $("#parcel-density-toggle"),
+  parcelDensityDescription: $("#parcel-density-description"),
+  parcelDensityLegend: $("#parcel-density-legend"),
   underutilizedSelect: $("#underutilized-select"),
   underutilizedDescription: $("#underutilized-description"),
   underutilizedDescriptionText: $("#underutilized-description-text"),
@@ -194,6 +197,203 @@ function formatTaxRate(value) {
   return Number.isFinite(number)
     ? `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 }).format(number * 100)}%`
     : "Not available";
+}
+
+function formatParcelBreak(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function interpolateParcelColor(startColor, endColor, amount) {
+  const start = startColor.match(/^#([0-9a-f]{6})$/i)?.[1];
+  const end = endColor.match(/^#([0-9a-f]{6})$/i)?.[1];
+  if (!start || !end) return endColor;
+  const ratio = Math.max(0, Math.min(1, amount));
+  const channels = [0, 2, 4].map((index) => {
+    const from = Number.parseInt(start.slice(index, index + 2), 16);
+    const to = Number.parseInt(end.slice(index, index + 2), 16);
+    return Math.round(from + (to - from) * ratio).toString(16).padStart(2, "0");
+  });
+  return `#${channels.join("")}`;
+}
+
+function parcelRampColor(colors, position) {
+  if (!colors.length) return null;
+  const bounded = Math.max(0, Math.min(colors.length - 1, position));
+  const startIndex = Math.floor(bounded);
+  const endIndex = Math.min(colors.length - 1, startIndex + 1);
+  return interpolateParcelColor(colors[startIndex], colors[endIndex], bounded - startIndex);
+}
+
+function parcelValueColor(value, bins, colors) {
+  if (!Number.isFinite(value) || !bins.length) return null;
+  const index = bins.findIndex((bin) => value <= bin.max);
+  if (index < 0) return bins.at(-1).color;
+  const bin = bins[index];
+  const lowerValue = index === 0 ? bins.domainMin : bins[index - 1].max;
+  const lowerColor = bin.startColor;
+  const range = bin.max - lowerValue;
+  return interpolateParcelColor(lowerColor, bin.color, range > 0 ? (value - lowerValue) / range : 1);
+}
+
+function jenksParcelBins(values, classCount, colors) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return [];
+
+  // Use unique values as indivisible weighted groups. This preserves ties, so a
+  // class boundary can never split parcels with the same assessment density.
+  const offset = sorted[0];
+  const groups = [];
+  sorted.forEach((value) => {
+    const last = groups.at(-1);
+    if (last?.max === value) last.count += 1;
+    else {
+      const shifted = value - offset;
+      groups.push({ max: value, count: 1, sum: shifted, sumSquares: shifted * shifted });
+    }
+  });
+
+  const numberOfClasses = Math.min(Math.max(1, classCount), groups.length);
+  const prefixCount = [0];
+  const prefixSum = [0];
+  const prefixSquares = [0];
+  groups.forEach((group) => {
+    prefixCount.push(prefixCount.at(-1) + group.count);
+    prefixSum.push(prefixSum.at(-1) + group.sum);
+    prefixSquares.push(prefixSquares.at(-1) + group.sumSquares);
+  });
+  const variance = (start, end) => {
+    const count = prefixCount[end] - prefixCount[start];
+    const sum = prefixSum[end] - prefixSum[start];
+    const squares = prefixSquares[end] - prefixSquares[start];
+    return Math.max(0, squares - (sum * sum) / count);
+  };
+
+  let previous = new Float64Array(groups.length + 1).fill(Infinity);
+  previous[0] = 0;
+  const starts = Array.from({ length: numberOfClasses + 1 }, () => new Int32Array(groups.length + 1));
+  for (let classIndex = 1; classIndex <= numberOfClasses; classIndex += 1) {
+    const current = new Float64Array(groups.length + 1).fill(Infinity);
+    for (let end = classIndex; end <= groups.length; end += 1) {
+      for (let start = classIndex - 1; start < end; start += 1) {
+        const cost = previous[start] + variance(start, end);
+        if (cost < current[end]) {
+          current[end] = cost;
+          starts[classIndex][end] = start;
+        }
+      }
+    }
+    previous = current;
+  }
+
+  const classEnds = new Array(numberOfClasses);
+  let end = groups.length;
+  for (let classIndex = numberOfClasses; classIndex > 0; classIndex -= 1) {
+    classEnds[classIndex - 1] = end;
+    end = starts[classIndex][end];
+  }
+
+  let groupStart = 0;
+  let startColor = colors[0];
+  const bins = classEnds.map((groupEnd, index) => {
+    const max = groups[groupEnd - 1].max;
+    const count = prefixCount[groupEnd] - prefixCount[groupStart];
+    const colorPosition = ((index + 1) / numberOfClasses) * (colors.length - 1);
+    const color = parcelRampColor(colors, colorPosition);
+    const label = index === 0
+      ? `Up to ${formatParcelBreak(max)}`
+      : `>${formatParcelBreak(groups[groupStart - 1].max)}–${formatParcelBreak(max)}`;
+    groupStart = groupEnd;
+    const bin = { max, label, color, startColor, count };
+    startColor = color;
+    return bin;
+  });
+  bins.domainMin = sorted[0];
+  return bins;
+}
+
+const parcelVisualizationBinsCache = new WeakMap();
+function parcelVisualizationBins(visualization, geography, signal) {
+  let geographyCache = parcelVisualizationBinsCache.get(geography);
+  if (!geographyCache) {
+    geographyCache = new Map();
+    parcelVisualizationBinsCache.set(geography, geographyCache);
+  }
+  const cached = geographyCache.get(visualization.key);
+  if (cached?.bins) return cached.bins;
+  if (cached?.promise) return abortable(cached.promise, signal);
+
+  const sourceState = state;
+  const entry = { promise: null, bins: null };
+  entry.promise = (async () => {
+    if (sourceState.parcelVisualization !== visualization) throw new DOMException("State changed", "AbortError");
+    const records = await relatedRecordsForGeography(geography);
+    if (state !== sourceState) throw new DOMException("State changed", "AbortError");
+    const accountsByParcel = new Map();
+    const parcelProperties = new Map();
+    records.forEach((account) => {
+      const key = String(account.__parcelGeometryKey || "").trim();
+      if (!key) return;
+      if (!accountsByParcel.has(key)) accountsByParcel.set(key, []);
+      accountsByParcel.get(key).push(account);
+      if (!parcelProperties.has(key)) parcelProperties.set(key, {});
+      Object.assign(parcelProperties.get(key), account);
+    });
+    const values = [...accountsByParcel.values()]
+      .map((accounts) => visualization.value({ accounts }));
+    const validValues = values.filter(Number.isFinite);
+    if (!validValues.length) throw new Error("No parcel values are available in the selected geography for Jenks classification.");
+    const bins = jenksParcelBins(validValues, visualization.classCount || 9, visualization.colors);
+    bins.noDataCount = Math.max(0, values.length - validValues.length);
+    return bins;
+  })();
+  geographyCache.set(visualization.key, entry);
+  entry.promise.then((bins) => {
+    entry.bins = bins;
+    entry.promise = null;
+  }).catch(() => {
+    if (geographyCache.get(visualization.key) === entry) geographyCache.delete(visualization.key);
+  });
+  return abortable(entry.promise, signal);
+}
+
+function renderParcelVisualizationLegend(visualization, bins, emptyMessage = "No parcels have a valid area and land appraisal in this geography.") {
+  elements.parcelDensityLegend.replaceChildren();
+  if (!bins?.length) {
+    const empty = document.createElement("span");
+    empty.className = "parcel-density-legend-item";
+    empty.textContent = emptyMessage;
+    elements.parcelDensityLegend.append(empty);
+  } else {
+    bins.forEach((bin) => {
+      const item = document.createElement("span");
+      item.className = "parcel-density-legend-item";
+      const swatch = document.createElement("span");
+      swatch.className = "parcel-density-legend-swatch";
+      swatch.style.background = `linear-gradient(90deg, ${bin.startColor}, ${bin.color})`;
+      const label = document.createElement("span");
+      label.textContent = Number.isFinite(bin.count) ? `${bin.label} · ${bin.count.toLocaleString()} parcel${bin.count === 1 ? "" : "s"}` : bin.label;
+      item.append(swatch, label);
+      elements.parcelDensityLegend.append(item);
+    });
+    if (visualization.noDataColor && Number.isFinite(bins.noDataCount) && bins.noDataCount > 0) {
+      const item = document.createElement("span");
+      item.className = "parcel-density-legend-item";
+      const swatch = document.createElement("span");
+      swatch.className = "parcel-density-legend-swatch";
+      swatch.style.backgroundColor = visualization.noDataColor;
+      const label = document.createElement("span");
+      label.textContent = `${visualization.noDataLabel || "No area/value"} · ${bins.noDataCount.toLocaleString()} parcels`;
+      item.append(swatch, label);
+      elements.parcelDensityLegend.append(item);
+    }
+  }
+  elements.parcelDensityDescription.textContent = visualization.description;
+  elements.parcelDensityLegend.hidden = !elements.parcelDensityToggle.checked;
+  elements.parcelDensityDescription.hidden = !elements.parcelDensityToggle.checked;
 }
 
 function escapeHtml(value) {
@@ -393,6 +593,17 @@ function sourceStatistics(source, statistics) {
 
 const relatedRecordsByGeography = new WeakMap();
 
+// Lets one caller stop waiting on a shared download without cancelling it for other callers.
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 function relatedGeometryParams(geography) {
   if (!isSpatialGeography(geography)) return {};
   return {
@@ -474,16 +685,20 @@ async function relatedRecordsForGeography(geography, signal) {
   if (config.loadRecords) {
     return config.loadRecords(geography, signal);
   }
-  let promise = relatedRecordsByGeography.get(geography);
-  if (!promise) {
-    promise = (async () => {
-      const geometryByKey = await relatedGeometryByKey(geography, signal);
-      return relatedRowsForKeys([...geometryByKey.keys()], geometryByKey, signal);
-    })();
-    relatedRecordsByGeography.set(geography, promise);
-    promise.catch(() => relatedRecordsByGeography.delete(geography));
+  // The download is shared by the tax summary and the parcel visualization, so it
+  // only stops when the cache entry is evicted, not when one caller aborts.
+  let entry = relatedRecordsByGeography.get(geography);
+  if (!entry) {
+    const controller = new AbortController();
+    const promise = relatedGeometryByKey(geography, controller.signal)
+      .then((geometryByKey) => relatedRowsForKeys([...geometryByKey.keys()], geometryByKey, controller.signal));
+    entry = { promise, controller };
+    relatedRecordsByGeography.set(geography, entry);
+    promise.catch(() => {
+      if (relatedRecordsByGeography.get(geography) === entry) relatedRecordsByGeography.delete(geography);
+    });
   }
-  return promise;
+  return abortable(entry.promise, signal);
 }
 
 function relatedStatisticValue(properties, field) {
@@ -1203,7 +1418,7 @@ function createParcelStyle() {
 }
 
 function underutilizedStyle(style) {
-  return { ...style, color: "#e56b2f", fillColor: "#f4a261", weight: 2.5, fillOpacity: 0.58 };
+  return { ...style, stroke: true, color: "#e56b2f", opacity: 1, fillColor: "#f4a261", weight: 2.5, fillOpacity: 0.58 };
 }
 
 // Zoomed out: a server image (when the state has a map service) and click-to-query.
@@ -1216,6 +1431,10 @@ function createParcelMapLayer(geography) {
   let pendingRefreshResolve = null;
   let imageOverlay = null;
   let vectorLayer = null;
+  let shapeRenderer = null;
+  let visualizationBins = [];
+  let visualizationController = null;
+  const layerState = state;
 
   const removeImage = () => {
     if (imageOverlay) layer.removeLayer(imageOverlay);
@@ -1228,9 +1447,23 @@ function createParcelMapLayer(geography) {
 
   const shapeStyle = (feature) => {
     const center = feature.properties.center || geometryCenter(feature.geometry);
+    let style = createParcelStyle();
+    const visualization = state.parcelVisualization;
+    if (elements.parcelDensityToggle.checked && visualization && visualizationBins.length) {
+      const value = visualization.value(feature.properties);
+      let fillColor = visualization.noDataColor;
+      if (Number.isFinite(value)) {
+        fillColor = visualization.continuousRamp
+          ? parcelValueColor(value, visualizationBins, visualization.colors)
+          : (visualizationBins.find((bin) => value <= bin.max) || visualizationBins.at(-1)).color;
+      }
+      // A thin stroke in the fill color covers anti-aliasing seams, so adjacent
+      // parcels with similar values read as one continuous region.
+      if (fillColor) style = { ...style, stroke: true, color: fillColor, weight: 0.75, opacity: 1, fillColor, fillOpacity: 1 };
+    }
     return feature.properties.accounts.some((account) => isUnderutilized(account, center))
-      ? underutilizedStyle(createParcelStyle())
-      : createParcelStyle();
+      ? underutilizedStyle(style)
+      : style;
   };
   const orphanStyle = (points) => {
     const base = { radius: 5, color: PARCEL_COLOR, weight: 1.5, fill: false };
@@ -1243,6 +1476,13 @@ function createParcelMapLayer(geography) {
     if (!vectorLayer) return;
     vectorLayer.shapes.eachLayer((child) => child.setStyle(shapeStyle(child.feature)));
     vectorLayer.orphans.forEach((marker) => marker.setStyle(orphanStyle(marker.points)));
+  };
+
+  layer.clearParcelVisualization = () => {
+    visualizationController?.abort();
+    visualizationController = null;
+    visualizationBins = [];
+    layer.restyle();
   };
 
   const showImage = async (signal) => {
@@ -1266,15 +1506,69 @@ function createParcelMapLayer(geography) {
     imageOverlay.once("remove", () => URL.revokeObjectURL(imageUrl));
   };
 
+  const loadVisualizationBins = () => {
+    const visualization = state.parcelVisualization;
+    if (!visualization) {
+      visualizationBins = [];
+      return;
+    }
+    if (!elements.parcelDensityToggle.checked) {
+      visualizationBins = [];
+      return;
+    }
+    if (visualizationBins.length) return;
+    const cached = parcelVisualizationBinsCache.get(geography)?.get(visualization.key)?.bins;
+    if (cached) {
+      visualizationBins = cached;
+      renderParcelVisualizationLegend(visualization, cached);
+      return;
+    }
+    renderParcelVisualizationLegend(visualization, [], "Calculating natural-breaks classes for this selected subset…");
+  };
+
+  const loadSelectedGeographyVisualizationBins = async () => {
+    const visualization = state.parcelVisualization;
+    if (!elements.parcelDensityToggle.checked || !visualization) return;
+    if (visualizationController) return;
+    const request = new AbortController();
+    visualizationController = request;
+    try {
+      const bins = await parcelVisualizationBins(visualization, geography, request.signal);
+      if (request.signal.aborted || !map.hasLayer(layer) || state !== layerState || state.parcelVisualization?.key !== visualization.key || !elements.parcelDensityToggle.checked) return;
+      visualizationBins = bins;
+      renderParcelVisualizationLegend(visualization, bins);
+      layer.restyle();
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      console.warn("Could not calculate selected-geography parcel land-value classes:", error);
+      renderParcelVisualizationLegend(visualization, [], "Natural-breaks classes could not be calculated for this selection. Toggle off and on to retry.");
+      setStatus("Could not calculate parcel land-value classes for this selection.", "error");
+    } finally {
+      if (visualizationController === request) visualizationController = null;
+    }
+  };
+
+  layer.updateParcelVisualization = () => {
+    loadVisualizationBins();
+    if (elements.parcelDensityToggle.checked) loadSelectedGeographyVisualizationBins();
+    else layer.restyle();
+  };
+
   const showVectors = async (signal) => {
     const { parcels, orphans } = await loadViewParcels(geography, viewEnvelopeFilter(), signal);
     if (signal.aborted || !map.hasLayer(layer)) return;
+    const densityMode = elements.parcelDensityToggle.checked && Boolean(state.parcelVisualization);
+    shapeRenderer = densityMode ? L.canvas({ padding: 0.5, tolerance: 4 }) : null;
+    loadVisualizationBins();
+    // Draw parcels immediately; they are recolored once the selection's classes finish.
+    if (densityMode && !visualizationBins.length) loadSelectedGeographyVisualizationBins();
     const shapesLayer = L.geoJSON({ type: "FeatureCollection", features: parcels }, {
+      ...(shapeRenderer ? { renderer: shapeRenderer } : {}),
       style: shapeStyle,
       onEachFeature: (feature, child) => {
         child.on({
           click: (event) => openAccountsPopup(event.latlng, feature.properties.accounts),
-          mouseover: () => child.setStyle({ weight: 2.5, fillOpacity: 0.48 }),
+          mouseover: () => child.setStyle({ stroke: true, color: "#26332c", weight: 1.5, opacity: 0.95, fillOpacity: 0.82 }),
           mouseout: () => child.setStyle(shapeStyle(feature)),
         });
       },
@@ -1297,6 +1591,7 @@ function createParcelMapLayer(geography) {
     removeVectors();
     vectorLayer = L.featureGroup([shapesLayer, ...orphanMarkers]).addTo(layer);
     vectorLayer.shapes = shapesLayer;
+    vectorLayer.features = parcels;
     vectorLayer.orphans = orphanMarkers;
     updateMapStatus(parcels.length || orphans.length
       ? "Parcel outlines shown; click a parcel to inspect its assessment"
@@ -1366,6 +1661,7 @@ function createParcelMapLayer(geography) {
     clearTimeout(refreshTimer);
     if (refreshRequest) refreshRequest.abort();
     if (parcelClickRequest) parcelClickRequest.abort();
+    visualizationController?.abort();
     removeParcelLoadingMarker();
     map.off("moveend", refreshQuietly);
     map.off("click", handleMapClick);
@@ -1392,10 +1688,13 @@ function taxPopupDetails(properties) {
   return { currentRate, currentTax, hypotheticalTax };
 }
 
-function popupMarkup(properties) {
+function popupMarkup(properties, parcelAccounts = [properties], showParcelVisualization = true) {
   const taxDetails = taxPopupDetails(properties);
+  const visualization = state.parcelVisualization;
+  const parcelValue = visualization?.value({ accounts: parcelAccounts });
   const rows = [
     ...state.popup.rows(properties, { formatCurrency }),
+    ...(visualization && showParcelVisualization ? [[visualization.label, Number.isFinite(parcelValue) ? `${formatCurrency(parcelValue)}/acre` : null]] : []),
     ["Applicable tax rate", formatTaxRate(taxDetails.currentRate)],
     ["Predicted tax bill", formatCurrency(taxDetails.currentTax)],
     ["Hypothetical split-rate bill", formatCurrency(taxDetails.hypotheticalTax)],
@@ -1410,7 +1709,7 @@ function popupMarkup(properties) {
 }
 
 function stackedPopupMarkup(accounts) {
-  if (accounts.length === 1) return popupMarkup(accounts[0]);
+  if (accounts.length === 1) return popupMarkup(accounts[0], accounts);
   const compare = (a, b) => String(a ?? "").localeCompare(String(b ?? ""), undefined, { numeric: true });
   const sorted = [...accounts].sort((a, b) => {
     const [a1, a2] = state.popup.sortKey(a);
@@ -1420,7 +1719,7 @@ function stackedPopupMarkup(accounts) {
   return `
     <div class="parcel-popup-stack">
       <p class="parcel-popup-count">${sorted.length.toLocaleString()} taxable ${escapeHtml(state.report.accountNoun)} at this location</p>
-      <div class="parcel-popup-list">${sorted.map(popupMarkup).join("")}</div>
+      <div class="parcel-popup-list">${sorted.map((properties, index) => popupMarkup(properties, sorted, index === 0)).join("")}</div>
     </div>`;
 }
 
@@ -2494,7 +2793,7 @@ function prepareTaxModelControls() {
 
 // ---------- Loading flow ----------
 
-function resetResultsUi() {
+function resetResultsUi({ preserveParcelVisualization = false } = {}) {
   if (openParcelPopup) {
     openParcelPopup.popup.remove();
     openParcelPopup = null;
@@ -2506,6 +2805,17 @@ function resetResultsUi() {
   taxScenarioModel = null;
   hideParcelLoadProgress();
   elements.underutilizedSelect.disabled = false;
+  elements.parcelDensityToggle.disabled = !state.parcelVisualization;
+  elements.parcelDensityToggle.closest("label").hidden = !state.parcelVisualization;
+  if (preserveParcelVisualization && state.parcelVisualization && elements.parcelDensityToggle.checked) {
+    elements.parcelDensityDescription.textContent = state.parcelVisualization.description;
+    elements.parcelDensityDescription.hidden = false;
+    elements.parcelDensityLegend.hidden = false;
+  } else {
+    elements.parcelDensityDescription.hidden = true;
+    elements.parcelDensityLegend.hidden = true;
+    elements.parcelDensityLegend.replaceChildren();
+  }
   underutilizedMode = "";
   elements.underutilizedSelect.value = "";
   updateUnderutilizedDescription();
@@ -2525,6 +2835,7 @@ function resetResultsUi() {
 }
 
 function clearParcelResults() {
+  evictRelatedRecordsCache(selectedGeography);
   if (currentRequest) {
     currentRequest.abort();
     currentRequest = null;
@@ -2540,18 +2851,27 @@ function clearParcelResults() {
   resetResultsUi();
 }
 
+function evictRelatedRecordsCache(geography) {
+  if (!geography) return;
+  relatedRecordsByGeography.get(geography)?.controller.abort();
+  relatedRecordsByGeography.delete(geography);
+  parcelVisualizationBinsCache.delete(geography);
+}
+
 async function loadParcels() {
   if (!selectedGeography) return;
   const geographyAtRequestStart = selectedGeography;
   const stateAtRequestStart = state;
   if (currentRequest) currentRequest.abort();
+  evictRelatedRecordsCache(geographyAtRequestStart);
+  parcelLayer?.clearParcelVisualization();
   if (downloadRequest) {
     downloadRequest.abort();
     downloadRequest = null;
   }
   const request = new AbortController();
   currentRequest = request;
-  resetResultsUi();
+  resetResultsUi({ preserveParcelVisualization: true });
   const geographyName = formatGeographyName(geographyAtRequestStart);
   setStatus(`Calculating tax metrics for ${geographyName}…`, "loading");
   updateMapStatus("Loading parcels…");
@@ -2617,6 +2937,14 @@ function applyStateBranding() {
   elements.parcelCountLabel.textContent = `${state.report.accountNoun[0].toUpperCase()}${state.report.accountNoun.slice(1)} loaded (n)`;
   elements.taxCurrentHeading.textContent = `Current ${state.tax.shortLabel}`;
   elements.taxModelHeading.textContent = `Hypothetical ${state.tax.shortLabel}`;
+  const visualization = state.parcelVisualization;
+  elements.parcelDensityToggle.closest("label").hidden = !visualization;
+  elements.parcelDensityToggle.disabled = !visualization;
+  elements.parcelDensityToggle.checked = false;
+  elements.parcelDensityDescription.textContent = visualization?.description || "";
+  elements.parcelDensityDescription.hidden = true;
+  elements.parcelDensityLegend.replaceChildren();
+  elements.parcelDensityLegend.hidden = true;
   applyUnderutilizedDefinitions();
   updateUnderutilizedDescription();
 }
@@ -2817,6 +3145,18 @@ elements.underutilizedSelect.addEventListener("change", () => {
       console.warn("Could not apply underutilized parcel highlight:", error);
       setStatus("Could not load the urban-area boundary.", "error");
     });
+});
+
+elements.parcelDensityToggle.addEventListener("change", () => {
+  const enabled = elements.parcelDensityToggle.checked && Boolean(state.parcelVisualization);
+  elements.parcelDensityDescription.hidden = !enabled;
+  elements.parcelDensityLegend.hidden = !enabled;
+  if (!enabled) {
+    parcelLayer?.clearParcelVisualization();
+    elements.parcelDensityLegend.replaceChildren();
+    return;
+  }
+  parcelLayer?.updateParcelVisualization();
 });
 
 elements.refreshParcels.addEventListener("click", loadParcels);

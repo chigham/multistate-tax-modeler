@@ -28,6 +28,7 @@
  *                                and computes geography statistics locally when the service cannot aggregate a join.
  *     exportMapUrl?, exportLayerId?   MapServer used for low-zoom parcel images
  *     generalizeShapes?         simplify drawn shapes to the screen resolution
+ *     parcelVisualization?      { label, description, classCount, colors, value(properties) } optional per-parcel choropleth; class boundaries may be classified from and cached by the selected geography
  *     outFields, taxableWhere, objectIdField, pageSize, pointPageSize?, downloadBatchSize?
  *     percentileExpressions?    false when the service cannot run PERCENTILE_CONT on an expression
  *     center?(props)            [lng, lat] from attributes, for polygon layers

@@ -14,9 +14,18 @@
   const PLACEHOLDER_RATE = 0.0065;
   const DISTRICT_OFFSET = 0.00003;
   const AREA_OFFSET = 0.0002;
+  const LAND_VALUE_PER_ACRE_COLORS = [
+    "#00441b", "#006d2c", "#238b45", "#74c476", "#ffff00",
+    "#ffb000", "#ff6d00", "#e31a1c", "#7f0000",
+  ];
 
   const hasValue = (value) => value !== null && value !== undefined && value !== "";
   const numberOrNull = (value) => hasValue(value) && Number.isFinite(Number(value)) ? Number(value) : null;
+  const landValuePerAcre = (properties) => {
+    const areaAcres = numberOrNull(properties.CALC_ACRE);
+    const landValue = numberOrNull(properties.LandAppraisal);
+    return areaAcres > 0 && landValue !== null ? landValue / areaAcres : null;
+  };
   const propertyClass = (properties) => String(properties.PropertyClassCode || "").trim().toUpperCase();
   const landUseCode = (properties) => String(properties.LandUseCode || "").trim();
   const isAgricultural = (properties) => propertyClass(properties) === "F";
@@ -153,7 +162,7 @@
       shapesUrl: PARCELS_URL,
       shapesCarryAttributes: true,
       generalizeShapes: true,
-      outFields: "OBJECTID,CleanParcelID,CountyID,COUNTY,FullPhysicalAddress,ParcelID,CountyCode,CountyName,TaxYear,TaxDistrict,TaxClass,PropertyClassCode,PropertyClassDescription,LandUse,LandUseCode,OccupancyDescription,YearBuilt,DeededAcres,CalculatedAcres,LandAppraisal,BuildingAppraisal,TotalAppraisal",
+      outFields: "OBJECTID,CleanParcelID,CountyID,COUNTY,FullPhysicalAddress,CALC_ACRE,ParcelID,CountyCode,CountyName,TaxYear,TaxDistrict,TaxClass,PropertyClassCode,PropertyClassDescription,LandUse,LandUseCode,OccupancyDescription,YearBuilt,DeededAcres,CalculatedAcres,LandAppraisal,BuildingAppraisal,TotalAppraisal",
       taxableWhere: TAXABLE_WHERE,
       objectIdField: "OBJECTID",
       pageSize: 2000,
@@ -163,7 +172,7 @@
         rowIdField: "ID",
         keyField: "CleanParcelID",
         geometryKeyField: "CleanParcelID",
-        geometryOutFields: "OBJECTID,CleanParcelID,CountyID,COUNTY,FullPhysicalAddress",
+        geometryOutFields: "OBJECTID,CleanParcelID,CountyID,COUNTY,FullPhysicalAddress,CALC_ACRE",
         geometryWhere: "1=1",
         where: TAXABLE_WHERE,
         outFields: "ID,CleanParcelID,ParcelID,CountyCode,CountyName,TaxYear,TaxDistrict,TaxClass,PropertyClassCode,PropertyClassDescription,LandUse,LandUseCode,OccupancyDescription,YearBuilt,DeededAcres,CalculatedAcres,LandAppraisal,BuildingAppraisal,TotalAppraisal,FullPhysicalAddress",
@@ -176,6 +185,22 @@
       },
     },
     fields: { land: "LandAppraisal", improvement: "BuildingAppraisal", improvementCount: "BuildingAppraisal", total: "TotalAppraisal" },
+    parcelVisualization: {
+      key: "land-value-per-acre",
+      label: "Land appraisal per parcel acre",
+      description: "Color shows the sum of joined LandAppraisal values divided by the parcel polygon layer's GIS-calculated CALC_ACRE. Nine Jenks natural-breaks thresholds are calculated from every parcel in the selected geography and stay fixed while panning. Colors blend continuously between those breakpoints, from dark green (lower) through yellow and orange to dark red (higher). Parcels are drawn without outlines, so neighbors with similar values merge into continuous regions. Gray marks parcels without a valid area/value. Legend counts cover the whole selection. Selected underutilized parcels keep their orange highlight.",
+      classCount: 9,
+      colors: LAND_VALUE_PER_ACRE_COLORS,
+      continuousRamp: true,
+      noDataColor: "#8c8c8c",
+      noDataLabel: "No valid parcel area/value",
+      value: (properties) => {
+        const accounts = properties.accounts || [];
+        const areaAcres = numberOrNull(accounts[0]?.CALC_ACRE);
+        const landValue = accounts.reduce((total, account) => total + (numberOrNull(account.LandAppraisal) || 0), 0);
+        return areaAcres > 0 ? landValue / areaAcres : null;
+      },
+    },
     values: (properties) => ({
       land: numberOrNull(properties.LandAppraisal),
       improvement: numberOrNull(properties.BuildingAppraisal),
@@ -255,6 +280,7 @@
         ["Tax class / district", [properties.TaxClass, properties.TaxDistrict].filter(Boolean).join(" / ") || null],
         ["Year built", optional(properties.YearBuilt)],
         ["Deeded acres", optional(properties.DeededAcres)],
+        ["Parcel shape acres (GIS)", numberOrNull(properties.CALC_ACRE)?.toLocaleString("en-US", { maximumFractionDigits: 2 })],
         ["Land appraisal", `${formatCurrency(properties.LandAppraisal)}${percentOf(properties.LandAppraisal, properties.TotalAppraisal)}`],
         ["Building appraisal", `${formatCurrency(properties.BuildingAppraisal)}${percentOf(properties.BuildingAppraisal, properties.TotalAppraisal)}`],
         ["Total appraisal", `${formatCurrency(properties.TotalAppraisal)}${Number(properties.TotalAppraisal) ? " (100%)" : ""}`],
@@ -262,16 +288,16 @@
     },
     csv: {
       headers: [
-        "OBJECTID", "CleanParcelID", "ParcelID", "CountyID", "COUNTY", "CountyCode", "CountyName", "TaxYear", "TaxDistrict", "TaxClass",
+        "OBJECTID", "CleanParcelID", "ParcelID", "CountyID", "COUNTY", "CALC_ACRE", "CountyCode", "CountyName", "TaxYear", "TaxDistrict", "TaxClass",
         "PropertyClassCode", "PropertyClassDescription", "LandUse", "LandUseCode", "OccupancyDescription", "YearBuilt", "DeededAcres", "CalculatedAcres",
-        "LandAppraisal", "BuildingAppraisal", "TotalAppraisal", "FullPhysicalAddress",
+        "LandAppraisal", "BuildingAppraisal", "TotalAppraisal", "LandAppraisalPerGisAcre", "FullPhysicalAddress",
       ],
       row: (properties) => [
-        properties.OBJECTID, properties.CleanParcelID, properties.ParcelID, properties.CountyID, properties.COUNTY, properties.CountyCode,
+        properties.OBJECTID, properties.CleanParcelID, properties.ParcelID, properties.CountyID, properties.COUNTY, properties.CALC_ACRE, properties.CountyCode,
         properties.CountyName, properties.TaxYear, properties.TaxDistrict, properties.TaxClass, properties.PropertyClassCode,
         properties.PropertyClassDescription, properties.LandUse, properties.LandUseCode, properties.OccupancyDescription, properties.YearBuilt,
         properties.DeededAcres, properties.CalculatedAcres, numberOrNull(properties.LandAppraisal), numberOrNull(properties.BuildingAppraisal),
-        numberOrNull(properties.TotalAppraisal), properties.FullPhysicalAddress,
+        numberOrNull(properties.TotalAppraisal), landValuePerAcre(properties), properties.FullPhysicalAddress,
       ],
     },
     report: {
@@ -281,6 +307,7 @@
       caveats: [
         `Tax Year ${TAX_YEAR} ParcelSummary is non-spatial. The app selects parcel polygons by geography, checks their centers against the selected boundary, joins matching CleanParcelID values, and computes statistics from the joined assessment records in the browser because the ArcGIS dynamic join does not support pagination or grouped statistics.`,
         "The geometry layer describes itself as updated for Tax Year 2023, while the joined assessment table contains Tax Year 2026. CleanParcelID is the join key; unmatched table-only records have no geometry and are excluded, and unmatched geometry has no assessment record and is excluded.",
+        "The optional land-appraisal-per-acre map divides summed Tax Year 2026 joined land appraisal by CALC_ACRE from the parcel geometry layer (updated for Tax Year 2023). It is an exploratory density comparison, not a contemporaneous assessor land rate; joined records sharing a parcel key are summed for the map color.",
         "A parcel key may relate to more than one assessment row. The model preserves those records rather than silently summing a one-to-many join as one account; source-record counts are not deduplicated ownership counts.",
         `Certified West Virginia county tax rates and parcel bills are not configured. Current tax and scenarios use an illustrative ${(PLACEHOLDER_RATE * 1000).toFixed(1)}-mill placeholder applied to TotalAppraisal; no tax credits or exemptions are independently verified.`,
         "PropertyClassCode F is an agricultural proxy; LandUseCode 101 is a residential one-family proxy. These fields do not establish legal agricultural treatment, detached-home status, or owner occupancy. Occupancy is not reported.",
@@ -290,7 +317,8 @@
       sfhNotes: "Qualifying residential benchmark proxy: positive BuildingAppraisal and LandUseCode 101 (Residential 1 Family). The source does not verify detached building form or owner occupancy.",
       sourceLines: [`WVGISTC WV parcel polygons: ${PARCELS_URL}`, `WVGISTC ParcelSummary, Tax Year ${TAX_YEAR}: ${SUMMARY_URL}`],
       csvColumnNotes: [
-        "CleanParcelID links the boundary feature to a ParcelSummary account row; OBJECTID and physical address are geometry/source attributes.",
+        "CleanParcelID links the boundary feature to a ParcelSummary account row; OBJECTID, physical address, and CALC_ACRE (GIS-calculated parcel acreage) are geometry/source attributes.",
+        "LandAppraisalPerGisAcre is the joined account LandAppraisal divided by geometry-layer CALC_ACRE; the ratio combines Tax Year 2026 assessments with parcel geometry updated for Tax Year 2023.",
         "CountyCode, CountyName, TaxYear, TaxClass, PropertyClassCode/Description, LandUse/Code, OccupancyDescription, YearBuilt, and acreage fields are ParcelSummary attributes.",
         "LandAppraisal: land; BuildingAppraisal: improvements; TotalAppraisal: total. Dollar values are the source appraisal values for the reported tax year.",
       ],

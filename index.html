@@ -55,6 +55,12 @@
             </div>
           </div>
           <div id="underutilized-control" class="selection-control underutilized-control" hidden>
+            <label class="parcel-density-toggle" for="parcel-density-toggle">
+              <input id="parcel-density-toggle" type="checkbox" />
+              <span>Color parcels by land appraisal per acre</span>
+            </label>
+            <p id="parcel-density-description" class="parcel-density-description" hidden></p>
+            <div id="parcel-density-legend" class="parcel-density-legend" aria-label="Land appraisal per acre color scale" hidden></div>
             <label class="underutilized-label" for="underutilized-select">Underutilized parcel view</label>
             <select id="underutilized-select" class="underutilized-select" aria-describedby="underutilized-description">
               <option value="">Show all loaded parcels</option>
