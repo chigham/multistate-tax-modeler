@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A multistate parcel and split-rate property tax analysis tool." />
+    <title>Parcel Analysis</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="icon" type="image/x-icon" href="assets/favicon.ico">
+  </head>
+  <body>
+    <main class="app-shell">
+      <div id="map" class="map" aria-label="Interactive parcel map"></div>
+
+      <section class="welcome-panel" aria-labelledby="app-title">
+        <div class="brand-lockup">
+          <span id="brand-mark" class="brand-mark" aria-hidden="true">PA</span>
+          <div>
+            <p id="app-eyebrow" class="eyebrow">Property insights</p>
+            <h1 id="app-title">Parcel Analysis</h1>
+          </div>
+        </div>
+        <p class="welcome-copy">Choose a state and a jurisdictional boundary to focus the tax analysis. Parcel loading takes a few moments.</p>
+        <div class="selection-controls" aria-label="Parcel filters">
+          <label class="selection-card state-card" for="state-select">
+            <span class="tool-icon tool-icon--state" aria-hidden="true">◆</span>
+            <span>
+              <small>State</small>
+              <select id="state-select" class="state-select"></select>
+            </span>
+          </label>
+          <div class="selection-control">
+            <button id="geography-toggle" class="selection-button" type="button" aria-expanded="false" aria-controls="geography-menu">
+              <span class="tool-icon" aria-hidden="true">⌖</span>
+              <span>
+                <small>Geographic subset</small>
+                <strong id="geography-selection">All</strong>
+              </span>
+              <span class="button-arrow" aria-hidden="true">⌄</span>
+            </button>
+            <div id="geography-menu" class="selection-menu" hidden>
+              <label for="geography-type-select">Geography type</label>
+              <select id="geography-type-select"></select>
+              <label id="geography-choice-label" for="geography-choice-select">Choose a district</label>
+              <select id="geography-choice-select" disabled>
+                <option value="">Loading choices…</option>
+              </select>
+              <p>Parcels are included when their centers fall inside the selected geography.</p>
+            </div>
+          </div>
+          <div id="underutilized-control" class="selection-control underutilized-control" hidden>
+            <label class="underutilized-label" for="underutilized-select">Underutilized parcel view</label>
+            <select id="underutilized-select" class="underutilized-select" aria-describedby="underutilized-description">
+              <option value="">Show all loaded parcels</option>
+              <option value="vacant">No improvements or vacant</option>
+              <option value="land-majority">Land &gt; improvements</option>
+              <option value="high-value-urban">HIGH VALUE land &gt; improvements</option>
+              <option value="above-mean-sfh">Land:total &gt; mean SFH</option>
+              <option value="above-median-sfh">Land:total &gt; median SFH</option>
+            </select>
+            <p id="underutilized-description" class="underutilized-description" role="note" hidden>
+              <strong>Selected view:</strong> <span id="underutilized-description-text"></span>
+            </p>
+            <div id="underutilized-zoom-hint" class="underutilized-zoom-hint" role="status" aria-live="polite">
+              <span id="underutilized-zoom-hint-text"></span>
+              <button id="underutilized-zoom-button" class="underutilized-zoom-button" type="button"></button>
+            </div>
+            <details class="underutilized-definitions">
+              <summary>View underutilized view definitions</summary>
+              <dl>
+                <div><dt>No improvements or vacant</dt><dd data-definition-for="vacant"></dd></div>
+                <div><dt>Land &gt; improvements</dt><dd data-definition-for="land-majority"></dd></div>
+                <div><dt>HIGH VALUE land &gt; improvements</dt><dd data-definition-for="high-value-urban"></dd></div>
+                <div><dt>Land:total &gt; mean SFH</dt><dd data-definition-for="above-mean-sfh"></dd></div>
+                <div><dt>Land:total &gt; median SFH</dt><dd data-definition-for="above-median-sfh"></dd></div>
+              </dl>
+            </details>
+          </div>
+        </div>
+        <p class="data-note"><span class="live-dot" aria-hidden="true"></span> <span id="data-note-text"></span></p>
+        <div class="welcome-panel-resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize selection panel" tabindex="0"></div>
+      </section>
+
+      <aside id="tool-panel" class="tool-panel" aria-labelledby="tool-title" hidden>
+        <p id="tool-kicker" class="eyebrow">Analysis tool</p>
+        <h2 id="tool-title">Analysis tool</h2>
+        <p id="selected-geography" class="selected-geography">All</p>
+        <p id="tool-description" class="tool-description"></p>
+        <p id="tool-rate-note" class="tool-rate-note" role="note" hidden></p>
+        <div class="tool-divider"></div>
+        <div class="status-row">
+          <span id="status-indicator" class="status-indicator" aria-hidden="true"></span>
+          <p id="status-message" role="status" aria-live="polite">Ready to query parcels in the current map view.</p>
+        </div>
+        <div id="parcel-load-progress" class="task-progress parcel-load-progress" hidden aria-live="polite">
+          <div class="task-progress__header">
+            <span id="parcel-load-progress-label">Loading parcel shapes…</span>
+            <strong id="parcel-load-progress-count">0 / —</strong>
+          </div>
+          <div class="task-progress__track" aria-hidden="true">
+            <span id="parcel-load-progress-bar"></span>
+          </div>
+        </div>
+        <div class="metric-grid" aria-label="Parcel query results">
+          <div class="metric-card">
+            <span id="parcel-count-label" class="metric-label">Parcels loaded (n)</span>
+            <strong id="parcel-count">—</strong>
+          </div>
+          <div id="analysis-metrics" class="metric-grid__dynamic"></div>
+        </div>
+        <div id="tax-current-county-results" class="tax-model-county-results" hidden>
+          <p id="tax-current-heading" class="tax-model-breakdown-heading">Current Property Tax</p>
+        </div>
+        <form id="tax-model-controls" class="tax-model-controls" hidden novalidate>
+          <p class="controls-heading">Split-rate scenario</p>
+          <p class="controls-copy">Set land and improvement rates (%). Results update as you type and show the change from current tax.</p>
+          <label id="tax-scope-control" class="scenario-field" hidden>
+            <span>Rate scope</span>
+            <select id="tax-scope-select"></select>
+          </label>
+          <fieldset class="scenario-ratio">
+            <legend>Revenue-neutral preset</legend>
+            <div class="scenario-mode">
+              <label><input type="radio" name="neutral-mode" value="ratio" checked><span>Split rate</span></label>
+              <label><input type="radio" name="neutral-mode" value="land-only"><span>Land only</span></label>
+            </div>
+            <div class="scenario-ratio__controls">
+              <span id="neutral-ratio-group" class="scenario-ratio__group">
+                <input id="neutral-ratio" type="number" min="0" step="0.1" inputmode="decimal" value="4" aria-label="Land to improvement ratio">
+                <span aria-hidden="true">: 1</span>
+              </span>
+              <span id="neutral-land-only-note" class="scenario-ratio__note" hidden>Improvements 0%</span>
+              <button id="apply-neutral-ratio" class="scenario-button" type="button">Apply</button>
+            </div>
+            <p id="neutral-hint" class="scenario-hint">Land : improvement rate ratio. Sets each editable row's rates so its revenue matches current tax.</p>
+          </fieldset>
+          <div id="tax-model-result" class="tax-model-result">
+            <span>Hypothetical total</span>
+            <span class="tax-scenario-value">
+              <strong id="hypothetical-tax-value">—</strong>
+              <small id="hypothetical-tax-delta" class="tax-scenario-delta"></small>
+            </span>
+          </div>
+          <div id="tax-model-county-results" class="tax-model-county-results" hidden>
+            <p id="tax-model-heading" class="tax-model-breakdown-heading">Hypothetical Property Tax</p>
+          </div>
+          <button id="reset-tax-model" class="scenario-button scenario-button--wide" type="button">Reset to current rates</button>
+        </form>
+        <section id="tax-download-controls" class="tax-download-controls" hidden aria-labelledby="tax-download-heading">
+          <p id="tax-download-heading" class="controls-heading">Download analysis data</p>
+          <p class="controls-copy">Downloading detailed parcel info may take several moments.</p>
+          <div class="download-actions">
+            <button id="download-summary" class="download-action" type="button">Summary statistics</button>
+            <button id="download-parcels" class="download-action" type="button">Detailed parcel info</button>
+            <button id="download-metadata" class="download-action" type="button">Metadata</button>
+          </div>
+        </section>
+        <button id="refresh-parcels" class="primary-action" type="button">
+          <span>Refresh parcels in view</span>
+          <span aria-hidden="true">↻</span>
+        </button>
+        <p class="unofficial-note">Planning and tax conclusions should require official review.</p>
+      </aside>
+
+      <div class="map-status" aria-live="polite">
+        <span id="map-status-text">Select a tool to load parcels</span>
+      </div>
+
+      <div class="acknowledgements">
+        <button class="acknowledgements-trigger" type="button" aria-label="Show data sources" aria-expanded="false" aria-controls="acknowledgements-popover">
+          <span aria-hidden="true">ⓘ</span> Data sources
+        </button>
+        <div id="acknowledgements-popover" class="acknowledgements-popover" role="dialog" aria-label="Acknowledgements" aria-hidden="true" inert>
+          <strong>Acknowledgements</strong>
+          <p>Parcel, boundary, and basemap data are provided by:</p>
+          <ul id="acknowledgements-list"></ul>
+        </div>
+      </div>
+    </main>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="https://unpkg.com/shpjs@6.2.0/dist/shp.js"></script>
+    <script src="js/core/helpers.js"></script>
+    <script src="js/states/registry.js"></script>
+    <script src="js/states/maryland.js"></script>
+    <script src="js/states/wisconsin.js"></script>
+    <script src="js/states/florida.js"></script>
+    <script src="js/states/montana.js"></script>
+    <script src="js/states/north-carolina.js"></script>
+    <script src="js/states/washington.js"></script>
+    <script src="js/states/arkansas.js"></script>
+    <script src="js/states/vermont.js"></script>
+    <script src="js/states/district-of-columbia.js"></script>
+    <script src="js/states/massachusetts.js"></script>
+    <script src="js/states/new-jersey.js"></script>
+    <script src="js/states/utah.js"></script>
+    <script src="js/states/west-virginia.js"></script>
+    <script src="js/states/indiana.js"></script>
+    <script src="js/states/ohio.js"></script>
+    <script src="js/states/virginia.js"></script>
+    <script src="js/app.js"></script>
+  </body>
+</html>
